@@ -5046,6 +5046,15 @@ size_t mg_tls_pending(struct mg_connection *c) {
 
 #if MG_ENABLE_MBEDTLS
 
+// ZCE patch (device-identity migration, item O5): esp_crt_bundle support for
+// the MG_TLS_CRT_BUNDLE sentinel (see mg_tls_init below).
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+#include "esp_crt_bundle.h"
+#endif
+#endif
+
 #if defined(MBEDTLS_VERSION_NUMBER) && MBEDTLS_VERSION_NUMBER >= 0x03000000
 #define MGRNG , rng_get, NULL
 #else
@@ -5166,6 +5175,24 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
     goto fail;
   }
   mbedtls_ssl_conf_rng(&tls->conf, mbed_rng, c);
+#if defined(ESP_PLATFORM) && defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+  // ZCE patch (device-identity migration, item O5): the MG_TLS_CRT_BUNDLE
+  // sentinel anchors the connection on the firmware-embedded certificate
+  // bundle. esp_crt_bundle_attach() installs its own trust store and verify
+  // callback and sets the authmode to REQUIRED; the hostname check still
+  // goes through mbedtls_ssl_set_hostname below.
+  if (opts->ca != NULL && strcmp(opts->ca, MG_TLS_CRT_BUNDLE) == 0) {
+    if ((rc = esp_crt_bundle_attach(&tls->conf)) != 0) {
+      mg_error(c, "crt bundle attach %#x", rc);
+      goto fail;
+    }
+    if (opts->srvname.len > 0) {
+      char *x = mg_mprintf("%.*s", (int) opts->srvname.len, opts->srvname.ptr);
+      mbedtls_ssl_set_hostname(&tls->ssl, x);
+      free(x);
+    }
+  } else
+#endif
   if (opts->ca == NULL || strcmp(opts->ca, "*") == 0) {
     mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_NONE);
   } else if (opts->ca != NULL && opts->ca[0] != '\0') {

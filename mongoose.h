@@ -1183,6 +1183,13 @@ void mg_http_serve_ssi(struct mg_connection *c, const char *root,
 
 
 
+// ZCE patch (device-identity migration, item O5): passing this sentinel as
+// mg_tls_opts.ca anchors the client connection on the firmware-embedded
+// certificate bundle (ESP-IDF esp_crt_bundle,
+// CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH) instead of a caller-supplied
+// CA buffer. ESP-IDF + CONFIG_MBEDTLS_CERTIFICATE_BUNDLE builds only.
+#define MG_TLS_CRT_BUNDLE "BUNDLE"
+
 struct mg_tls_opts {
   const char *ca;         // CA certificate file. For both listeners and clients
   const char *crl;        // Certificate Revocation List. For clients
