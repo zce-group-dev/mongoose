@@ -7161,7 +7161,9 @@ void mg_mdash_init(struct mg_mgr *mgr) {
 
 void mg_mdash_poll(struct mg_mgr *mgr) {
   static uint64_t timer = 0;
-  if (mg_mdash_conn == NULL && mg_timer_expired(&timer, 1000, mg_millis())) {
+  // No RPC handlers means mdash was never set up, or mg_mdash_free() ran
+  if (mg_mdash_conn == NULL && mgr->rpcs != NULL &&
+      mg_timer_expired(&timer, 1000, mg_millis())) {
     MG_INFO(("Connecting to %s", MG_MDASH_URL));
     mg_mdash_conn = mg_ws_connect(mgr, MG_MDASH_URL, mg_mdash_fn, NULL,
                                   "Origin: %s\r\n"
@@ -8332,10 +8334,10 @@ void mg_mgr_free(struct mg_mgr *mgr) {
   while (t != NULL) tmp = t->next, mg_free(t), t = tmp;
   mgr->timers = NULL;  // Important. Next call to poll won't touch timers
   for (c = mgr->conns; c != NULL; c = c->next) c->is_closing = 1;
-  mg_mgr_poll(mgr, 0);
 #if MG_ENABLE_MDASH
-  mg_mdash_free(mgr);
+  mg_mdash_free(mgr);  // Before the final poll, so mdash does not reconnect
 #endif
+  mg_mgr_poll(mgr, 0);
 #if MG_ENABLE_FREERTOS_TCP
   FreeRTOS_DeleteSocketSet(mgr->ss);
 #endif
@@ -22745,7 +22747,11 @@ int mg_rsa_crt_sign(const uint8_t *em, size_t em_len,
   memset(t2, 0, 2 * (size_t) fwlen * sizeof(*t2));
   t2[0] = mq[0];
   br_i31_mulacc(t2, mq, mp);
-  if (xlen != ((t2[0] + 7) >> 3)) goto done;
+  // t2 = p * q = n. In the i31 format, t2[0] is not the plain bit length but
+  // an encoded one: (number of 31-bit words << 5) + bits in the top word, e.g.
+  // 2114 for a 2048-bit n. The real bit length is t2[0] - (t2[0] >> 5).
+  // Using t2[0] as is gave 265 bytes for RSA-2048 and rejected every key
+  if (xlen != ((t2[0] - (t2[0] >> 5) + 7) >> 3)) goto done;
   br_i31_encode(signature, xlen, t2);
   for (u = xlen, ok = 0; u > 0; u--) {
     uint32_t wn = signature[u - 1], wx = x[u - 1];
@@ -22767,8 +22773,13 @@ int mg_rsa_crt_sign(const uint8_t *em, size_t em_len,
   br_i31_mulacc(s2, mq, t2);
   br_i31_reduce(t1, s2, mq);
   ok = rsa_i31_eq(t1, c2);
-  br_i31_decode(mp, p, plen);
-  br_i31_reduce(t1, s2, mp);
+  // Fault check, s mod p == s1. Decode p into t2, which is free now, and not
+  // back into mp: s2 starts at mq + fwlen and the result s = s2 + q * h is
+  // twice as long as a prime, so its upper half spills into mp at
+  // mq + 2 * fwlen. Decoding p there overwrote half of the signature, which
+  // failed this check, and would have produced a wrong signature without it
+  br_i31_decode(t2, p, plen);
+  br_i31_reduce(t1, s2, t2);
   ok &= rsa_i31_eq(t1, c1);
   if (!ok) goto done;
   ok = 0;
